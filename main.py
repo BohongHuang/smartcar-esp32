@@ -3,17 +3,23 @@ from time import sleep, time, sleep_us, sleep_ms, ticks_us, ticks_ms
 from ble_uart_peripheral import BLEUART
 import bluetooth
 
+CMD_IDLE = 0x00
+CMD_BLE_CONTROL = 0x01
+CMD_AVOID = 0x02
+
 pin_back_right_neg = Pin(4)
-pin_back_right_pos = Pin(15)
-pin_back_left_neg = Pin(5)
+pin_back_right_pos = Pin(23)
+pin_back_left_neg = Pin(26)
 pin_back_left_pos = Pin(27)
 pin_front_right_neg = Pin(21)
 pin_front_right_pos = Pin(22)
 pin_front_left_neg = Pin(32)
 pin_front_left_pos = Pin(33)
-pin_led = Pin(2, Pin.OUT)
-pin_dist_sensor_trig = Pin(23, Pin.OUT)
-pin_dist_sensor_echo = Pin(34, Pin.IN, Pin.PULL_DOWN)
+pin_dist_sensor_trig = Pin(15, Pin.OUT)
+pin_dist_sensor_echo_center = Pin(34, Pin.IN)
+pin_dist_sensor_echo_left = Pin(5, Pin.IN)
+pin_dist_sensor_echo_right = Pin(25, Pin.IN)
+pin_onboard_led = Pin(2, Pin.OUT)
 
 pwm_freq = 100000
 
@@ -67,31 +73,72 @@ right_neg = [
     pwm_front_right_neg,
     pwm_back_right_neg
 ]
+dist_sensor_trig_us_left = 0
+dist_sensor_trig_us_right = 0
+dist_sensor_trig_us_center = 0
+dist_cm_left = 1000.0
+dist_cm_center = 1000.0
+dist_cm_right = 1000.0
 
-dist_sensor_trig_us = 0
-dist_cm = 1000.0
 
-#下降沿外部中断函数
-def on_dist_sensor_echo_low(pin):
-    global dist_sensor_trig_us, dist_cm
-    if dist_sensor_trig_us > 0:
+# 下降沿外部中断函数
+def on_dist_sensor_echo_low_center(pin):
+    global dist_sensor_trig_us_center, dist_cm_center
+    if dist_sensor_trig_us_center > 0:
         dist_sensor_echo_us = ticks_us()
-        delta = dist_sensor_echo_us - dist_sensor_trig_us
-        dist_cm = float(delta) / 58.0
-        dist_sensor_trig_us = 0
-
-#上升沿外部中断函数
-def on_dist_sensor_echo_high(pin):
-    global dist_sensor_trig_us
-    dist_sensor_trig_us = ticks_us()
-    pin_dist_sensor_echo.irq(trigger=Pin.IRQ_FALLING, handler=on_dist_sensor_echo_low)
+        delta = dist_sensor_echo_us - dist_sensor_trig_us_center
+        dist_cm_center = float(delta) / 58.0
+        dist_sensor_trig_us_center = 0
 
 
-#触发距离测量
+# 上升沿外部中断函数
+def on_dist_sensor_echo_high_center(pin):
+    global dist_sensor_trig_us_center
+    dist_sensor_trig_us_center = ticks_us()
+    pin_dist_sensor_echo_center.irq(trigger=Pin.IRQ_FALLING, handler=on_dist_sensor_echo_low_center)
+
+
+# 下降沿外部中断函数
+def on_dist_sensor_echo_low_left(pin):
+    global dist_sensor_trig_us_left, dist_cm_left
+    if dist_sensor_trig_us_left > 0:
+        dist_sensor_echo_us = ticks_us()
+        delta = dist_sensor_echo_us - dist_sensor_trig_us_left
+        dist_cm_left = float(delta) / 58.0
+        dist_sensor_trig_us_left = 0
+
+
+# 上升沿外部中断函数
+def on_dist_sensor_echo_high_left(pin):
+    global dist_sensor_trig_us_left
+    dist_sensor_trig_us_left = ticks_us()
+    pin_dist_sensor_echo_left.irq(trigger=Pin.IRQ_FALLING, handler=on_dist_sensor_echo_low_left)
+
+
+# 下降沿外部中断函数
+def on_dist_sensor_echo_low_right(pin):
+    global dist_sensor_trig_us_right, dist_cm_right
+    if dist_sensor_trig_us_right > 0:
+        dist_sensor_echo_us = ticks_us()
+        delta = dist_sensor_echo_us - dist_sensor_trig_us_right
+        dist_cm_right = float(delta) / 58.0
+        dist_sensor_trig_us_right = 0
+
+
+# 上升沿外部中断函数
+def on_dist_sensor_echo_high_right(pin):
+    global dist_sensor_trig_us_right
+    dist_sensor_trig_us_right = ticks_us()
+    pin_dist_sensor_echo_right.irq(trigger=Pin.IRQ_FALLING, handler=on_dist_sensor_echo_low_right)
+
+
+# 触发距离测量
 def dist_sensor_trig():
-    global dist_sensor_trig_us
+    global dist_sensor_trig_us_center
     # dist_sensor_trig_us = ticks_us()
-    pin_dist_sensor_echo.irq(trigger=Pin.IRQ_RISING, handler=on_dist_sensor_echo_high)
+    pin_dist_sensor_echo_left.irq(trigger=Pin.IRQ_RISING, handler=on_dist_sensor_echo_high_left)
+    pin_dist_sensor_echo_center.irq(trigger=Pin.IRQ_RISING, handler=on_dist_sensor_echo_high_center)
+    pin_dist_sensor_echo_right.irq(trigger=Pin.IRQ_RISING, handler=on_dist_sensor_echo_high_right)
     pin_dist_sensor_trig.on()
     sleep_us(10)
     pin_dist_sensor_trig.off()
@@ -136,7 +183,7 @@ class StateMachine:
     state = None
 
     def __init__(self):
-        self.state = Free(self)
+        self.state = Avoidance(self)
 
     def set_state(self, to_state):
         from_state = self.state
@@ -217,40 +264,48 @@ class Back(DurationBacktrackState):
     name = 'Back'
 
     def enter(self, state_from):
-        move(0.0, -0.8)
+        move(0.0, -0.25)
 
 
 # 右转
 class Rotate(DurationBacktrackState):
     name = 'Rotate'
+    dir = 2.0
+
+    def __init__(self, state_machine, from_state, dir, duration):
+        super().__init__(state_machine, from_state, duration)
+        self.dir = dir
 
     def enter(self, state_from):
-        move(2.0, 0.8)
+        move(self.dir, 0.25)
 
 
 # 尝试另一个方向（后退0.5s+右转0.5s）
 class TryDirection(SequenceState, BacktrackState):
     name = 'TryDirection'
 
-    def __init__(self, state_machine, from_state):
+    def __init__(self, state_machine, from_state, dir):
         super().__init__(state_machine)
         self.from_state = from_state
-        self.sequence = [Back(self.state_machine, self, 0.5), Rotate(self.state_machine, self, 0.5)]
+        self.sequence = [Back(self.state_machine, self, 0.25), Rotate(self.state_machine, self, dir, 0.25)]
 
     def on_finish(self):
         self.state_machine.set_state(self.from_state)
 
 
 # 默认状态（小车持续前进，直到距离传感器测量的距离小于20cm，进入TryDirection状态)
-class Free(State):
+class Avoidance(State):
     name = 'Free'
 
     def enter(self, state_from):
-        move(0, 0.8)
+        move(0, 0.25)
 
     def update(self, delta):
-        if dist_cm < 20.0:
-            self.state_machine.set_state(TryDirection(self.state_machine, self))
+        if min(dist_cm_left, dist_cm_center, dist_cm_right) < 15.0:
+            self.state_machine.set_state(
+                TryDirection(self.state_machine, self, 2.0 if dist_cm_left < dist_cm_right else -2.0))
+
+
 
 
 def map_bound(x, ibound, fbound):  # 把[0, ibound]的整数映射成[-fbound, fbound]的浮点数
@@ -295,7 +350,6 @@ class UARTControlled(State):
         elif ticks_ms() - self.ticks_ms > self.expire_time_ms:
             self.dir = 0
             self.speed = 0
-        print(str(ticks_ms() - self.ticks_ms))
         # print('dir: ' + str(self.dir) + ' speed: ' + str(self.speed))
         move(self.dir, self.speed)
 
@@ -313,40 +367,79 @@ class WiredUARTControlled(UARTControlled):
 
 
 ble = bluetooth.BLE()
+uart_ble = BLEUART(ble=ble, name="SmartCar", rxbuf=2)
+
+
+
+def handle_command(cmd, state_machine):
+    if cmd == CMD_IDLE:
+        state_machine.set_state(Idle(state_machine))
+    elif cmd == CMD_BLE_CONTROL:
+        state_machine.set_state(BLEUARTControlled(state_machine))
+    elif cmd == CMD_AVOID:
+        state_machine.set_state(Avoidance(state_machine))
 
 
 # 蓝牙（BLE）串口控制
 class BLEUARTControlled(UARTControlled):
     name = 'BLEUARTControlled'
-    uart_ble = BLEUART(ble=ble, name="SmartCar", rxbuf=1)
+
 
     def enter(self, state_from):
         def on_receive_data():
-            data = self.uart_ble.read()
-            dir, speed = decode_control_data(data)
-            self.dir = dir
-            self.speed = speed
-            self.ticks_ms = ticks_ms()
+            data = uart_ble.read()
+            if data and len(data) > 0:
+                if data[0] == CMD_BLE_CONTROL:
+                    data = data[1:]
+                    if len(data) == 1:
+                        dir, speed = decode_control_data(data)
+                        self.dir = dir
+                        self.speed = speed
+                        self.ticks_ms = ticks_ms()
+                else:
+                    handle_command(data[0], self.state_machine)
 
-        self.uart_ble.irq(on_receive_data)
+
+        uart_ble.irq(on_receive_data)
 
     def read_data(self):
         return None  # self.uart_ble.read(max(self.uart_ble.any() // 2, 1))
 
 
+class Idle(State):
+    name = "Idle"
+    onboard_led_anim_time = 0.0
+    onboard_led_anim_duration = 1.0
+    def enter(self, state_from):
+        def on_receive_command():
+            cmd = uart_ble.read()
+            if cmd and len(cmd) > 0:
+                handle_command(cmd[0], self.state_machine)
+        uart_ble.irq(on_receive_command)
+    def exit(self, state_to):
+        pin_onboard_led.on()
+    def update(self, delta):
+        move(0.0, 0.0)
+        self.onboard_led_anim_time += delta
+
+        if self.onboard_led_anim_time >= self.onboard_led_anim_duration:
+            self.onboard_led_anim_time -= self.onboard_led_anim_time
+        if self.onboard_led_anim_time < self.onboard_led_anim_duration / 2.0:
+            pin_onboard_led.off()
+        else:
+            pin_onboard_led.on()
+
 # 刷新状态的间隔时间
 delta_time = 1.0 / 10.0
 
-
 def main():
     state_machine = StateMachine()
-    state_controlled = BLEUARTControlled(state_machine)
-    state_machine.set_state(state_controlled)
+    state_machine.set_state(Idle(state_machine))
     while True:
-        dist_sensor_trig()
+        # print('left: ' + str(dist_cm_left) + ' center: ' + str(dist_cm_center) + ' right: ' + str(dist_cm_right))
         state_machine.update(delta_time)
+        dist_sensor_trig()  # 确保中断是在sleep中触发的
         sleep(delta_time)
 
 
 main()
-
